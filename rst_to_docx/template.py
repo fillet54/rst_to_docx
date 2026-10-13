@@ -1,6 +1,8 @@
 """Operations on the Word template: instructions page, markers, placeholders."""
 
+import copy
 import re
+from collections.abc import Sequence
 
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
@@ -8,14 +10,17 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from .errors import TemplateError, UndefinedVariableError
-from .variables import NotScalarError, VariableLookupError, lookup_scalar
+from .variables import NotScalarError, VariableLookupError, lookup, lookup_scalar
 
 CONTENT_MARKER = "{{content}}"
 END_INSTRUCTIONS_MARKER = "{{end-instructions}}"
 RESERVED = {"content", "end-instructions"}
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][\w.\-]*)\s*\}\}")
+# {{list.*.field}}: "*" stands for each item of the list, one table row per item.
+ROW_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][\w.\-]*)\.\*((?:\.[\w\-]+)*)\s*\}\}")
 
 W_P = qn("w:p")
+W_TR = qn("w:tr")
 W_T = qn("w:t")
 W_BR = qn("w:br")
 FIELD_TAGS = (qn("w:fldChar"), qn("w:fldSimple"))
@@ -119,13 +124,54 @@ def substitute_placeholders(document, variables, skip=()):
     Word often splits text like ``{{version}}`` over several runs, so matching
     is done on the paragraph's combined text and each replacement is written
     into the run where the placeholder starts (keeping that run's formatting).
+
+    A table row containing ``{{list.*.field}}`` placeholders is repeated once
+    per item of ``list`` first.
     """
     undefined = []
     for root in _template_roots(document, skip):
+        for tr in list(root.iter(W_TR)):
+            undefined.extend(_expand_row(tr, variables))
         for p in list(root.iter(W_P)):
             undefined.extend(_substitute_paragraph(p, variables))
     if undefined:
         raise UndefinedVariableError(sorted(set(undefined)))
+
+
+def _row_paragraphs(tr):
+    """Paragraphs of table row ``tr``, excluding those of tables nested in it."""
+    return [p for p in tr.iter(W_P) if next(p.iterancestors(W_TR)) is tr]
+
+
+def _expand_row(tr, variables):
+    """Repeat ``tr`` for each item of the list its ``{{list.*...}}`` placeholders name.
+
+    Each copy gets the item's index in place of ``*`` (``{{list.0.field}}``),
+    which the ordinary substitution then fills. Returns the names that could
+    not be expanded.
+    """
+    names = {m.group(1) for p in _row_paragraphs(tr)
+             for m in ROW_PLACEHOLDER.finditer(paragraph_text(p))}
+    if not names:
+        return []
+    if len(names) > 1:
+        return [f"{' and '.join(sorted(names))} (one table row can repeat only one list)"]
+    name = names.pop()
+    try:
+        items = lookup(variables, name)
+    except VariableLookupError:
+        return [name]
+    if isinstance(items, str) or not isinstance(items, Sequence):
+        return [f"{name} (is a {type(items).__name__}, not a list)"]
+    for index in range(len(items)):
+        row = copy.deepcopy(tr)
+        for p in _row_paragraphs(row):
+            texts = _text_elements(p)
+            for m in reversed(list(ROW_PLACEHOLDER.finditer(paragraph_text(p)))):
+                _replace_range(texts, m.start(), m.end(), f"{{{{{name}.{index}{m.group(2)}}}}}")
+        tr.addprevious(row)
+    tr.getparent().remove(tr)
+    return []
 
 
 def _substitute_paragraph(p, variables):
@@ -133,7 +179,8 @@ def _substitute_paragraph(p, variables):
     texts = _text_elements(p)
     full = "".join(t.text or "" for t in texts)
     matches = [m for m in PLACEHOLDER.finditer(full) if m.group(1) not in RESERVED]
-    undefined = []
+    undefined = [f"{m.group(1)}.* (only works inside a table row)"
+                 for m in ROW_PLACEHOLDER.finditer(full)]
     for m in reversed(matches):  # back to front so earlier offsets stay valid
         name = m.group(1)
         try:

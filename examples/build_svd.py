@@ -58,6 +58,17 @@ def main():
                 "author": "Release Engineering",
                 "srs": "SRS-WC-0007", "sdd": "SDD-WC-0011"},
         "build": {"compiler": "GCC 13.2", "commit": "57eb69e", "id": "1832"},
+        "revisions": [
+            {"rev": "-", "date": "2026-08-03", "description": "Initial release.",
+             "author": "P. Gomez"},
+            {"rev": "A", "date": "2026-10-13", "description": "Updated for version 1.4.2.",
+             "author": "P. Gomez"},
+        ],
+        "signatures": [
+            {"role": "Prepared by", "name": "Release Engineering"},
+            {"role": "Quality Assurance", "name": "QA Lead"},
+            {"role": "Approved by", "name": "Program Manager"},
+        ],
         "files": file_records(dist) if dist else SAMPLE_FILES,
         "changelog": CHANGELOG,
     }

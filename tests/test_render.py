@@ -19,6 +19,9 @@ VARS = {
     "project": "Widget",
     "release": {"version": "1.4.2", "date": "2026-10-13"},
     "doc": {"number": "SVD-1", "revision": "B", "classification": "UNCLASSIFIED", "author": "QA"},
+    "revisions": [{"rev": "A", "date": "2026-08-03", "description": "First", "author": "PG"},
+                  {"rev": "B", "date": "2026-10-13", "description": "Second", "author": "PG"}],
+    "signatures": [{"role": "Author", "name": "PG"}],
 }
 JIRA = "https://jira.example.com/browse/"
 
@@ -130,6 +133,57 @@ def test_template_styles_are_minimal_black_and_numbered(template):
         lvl = numbering.xpath(
             f"w:abstractNum[@w:abstractNumId={abstract_id}]/w:lvl[@w:ilvl={num_pr.ilvl.val}]")[0]
         assert lvl.find(qn("w:lvlText")).get(qn("w:val")) == text
+
+
+def _row_template(*cells):
+    d = docx.Document()
+    table = d.add_table(rows=2, cols=len(cells))
+    for i, text in enumerate(cells):
+        table.cell(0, i).text = f"H{i}"
+        table.cell(1, i).text = text
+    d.add_paragraph("{{content}}")
+    return d
+
+
+def _rows(table):
+    return [[c.text for c in row.cells] for row in table.rows]
+
+
+def test_table_row_repeats_for_each_list_item(template):
+    doc = do_render("x", template)
+    history, approvals = doc.tables[1:3]
+    assert _rows(history) == [["Rev", "Date", "Description", "Author"],
+                              ["A", "2026-08-03", "First", "PG"],
+                              ["B", "2026-10-13", "Second", "PG"]]
+    assert _rows(approvals) == [["Role", "Name", "Signature", "Date"], ["Author", "PG", "", ""]]
+    # Both sit before the rendered content.
+    body = list(doc.element.body)
+    assert body.index(approvals._tbl) < body.index(doc.paragraphs[-1]._p)
+
+
+def test_repeating_row_scalars_empty_list_and_split_runs():
+    d = _row_template("", "{{release.version}}")
+    p = d.tables[0].cell(1, 0).paragraphs[0]
+    p.add_run("{{names.")
+    p.add_run("*}}").bold = True
+    doc = do_render("x", d, strip_instructions=False, variables=dict(VARS, names=["a", "b"]))
+    assert _rows(doc.tables[0]) == [["H0", "H1"], ["a", "1.4.2"], ["b", "1.4.2"]]
+    doc = do_render("x", _row_template("{{names.*}}"), strip_instructions=False,
+                    variables=dict(VARS, names=[]))
+    assert _rows(doc.tables[0]) == [["H0"]]
+
+
+def test_repeating_row_errors():
+    def errors(template, **variables):
+        with pytest.raises(UndefinedVariableError) as exc:
+            render("x", template, variables=dict(VARS, **variables), strip_instructions=False)
+        return str(exc.value)
+
+    assert "nope" in errors(_row_template("{{nope.*.x}}"))
+    assert "not a list" in errors(_row_template("{{project.*}}"))
+    assert "only one list" in errors(_row_template("{{a.*}}", "{{b.*}}"), a=[1], b=[2])
+    assert "revisions.0.nope" in errors(_row_template("{{revisions.*.nope}}"))
+    assert "inside a table row" in errors(simple_template(["{{revisions.*.rev}}", "{{content}}"]))
 
 
 def test_placeholder_split_across_runs():

@@ -33,7 +33,10 @@ listed below, black Times New Roman text, 12 pt headings numbered 1., 1.1,
 document number, revision letter and release date, plus the classification
 in red at the bottom. It expects ``doc.number``, ``doc.revision``,
 ``doc.classification``, ``doc.author``, ``release.version``,
-``release.date`` and ``project`` in ``variables``. In practice you design
+``release.date`` and ``project`` in ``variables``, plus the lists
+``revisions`` (``rev``, ``date``, ``description``, ``author``) and
+``signatures`` (``role``, ``name``) for the revision history and approvals
+tables that follow the title page. In practice you design
 the template in Word using these markers:
 
 ``{{end-instructions}}``
@@ -49,6 +52,20 @@ the template in Word using these markers:
    Anywhere else in the body, a table, a header or a footer, this is
    replaced from ``variables``. Placeholders split across runs by Word are
    handled. An undefined name raises ``UndefinedVariableError``.
+
+``{{list.*.field}}``
+   In a table row, ``*`` stands for each item of a list in ``variables``:
+   the row is repeated once per item (and removed if the list is empty).
+   Use it for tables that sit outside the RST content, such as a revision
+   history or a signature table before ``{{content}}``. Design the header
+   row and one data row in Word::
+
+      | Rev                 | Date                 | Description                 |
+      | {{revisions.*.rev}} | {{revisions.*.date}} | {{revisions.*.description}} |
+
+   A row can repeat only one list. Other placeholders in the row are filled
+   as usual, and cells without placeholders (a blank signature cell) are
+   copied as they are.
 
 **Use the instructions page to keep styles alive.** Word only writes a
 built-in style into the file once it has been used, and python-docx can only

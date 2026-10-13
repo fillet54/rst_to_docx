@@ -12,7 +12,9 @@ Look:
 Layout:
   page 1  instructions page: a sample of every style, ends with {{end-instructions}}
   page 2  title page with {{placeholders}}
-  page 3  table of contents field
+  page 3  revision history and approvals: tables with one {{list.*.field}} row
+          that is repeated for each item of the list
+  page 4  table of contents field
   then    {{content}}
 
 In practice you'd design the template in Word; this script just produces a
@@ -27,7 +29,7 @@ import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
-from docx.shared import Inches, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 
 HEADING_LEVELS = 4
 LIST_LEVELS = 3
@@ -313,6 +315,34 @@ def title_page(doc):
     page_break(doc)
 
 
+def _list_table(doc, columns, widths, row_height=None):
+    """A table with a bold header row and one row that repeats for each list item."""
+    table = doc.add_table(rows=2, cols=len(columns), style="Table Grid")
+    table.autofit = False
+    for i, ((header, value), width) in enumerate(zip(columns, widths)):
+        table.cell(0, i).paragraphs[0].add_run(header).bold = True
+        table.cell(1, i).text = value
+        table.columns[i].width = Inches(width)  # the grid; Word reads the cells
+        for row in table.rows:
+            row.cells[i].width = Inches(width)
+    if row_height:
+        table.rows[1].height = row_height
+    return table
+
+
+def front_matter_page(doc):
+    """Revision history and approvals; "TOC Heading" keeps their titles unnumbered."""
+    doc.add_paragraph("Revision History", style="TOC Heading")
+    _list_table(doc, [("Rev", "{{revisions.*.rev}}"), ("Date", "{{revisions.*.date}}"),
+                      ("Description", "{{revisions.*.description}}"),
+                      ("Author", "{{revisions.*.author}}")], (0.6, 1.1, 3.4, 1.4))
+    doc.add_paragraph()
+    doc.add_paragraph("Approvals", style="TOC Heading")
+    _list_table(doc, [("Role", "{{signatures.*.role}}"), ("Name", "{{signatures.*.name}}"),
+                      ("Signature", ""), ("Date", "")], (1.6, 1.8, 2.0, 1.1), row_height=Pt(30))
+    page_break(doc)
+
+
 def toc_page(doc):
     doc.add_paragraph("Table of Contents", style="TOC Heading")
     add_field(doc.add_paragraph(), r'TOC \o "1-3" \h \z \u',
@@ -347,6 +377,7 @@ def build(path):
     set_numbering(doc)
     instructions_page(doc)
     title_page(doc)
+    front_matter_page(doc)
     toc_page(doc)
     doc.add_paragraph("{{content}}")
     header_footer(doc)
