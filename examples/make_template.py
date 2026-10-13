@@ -4,6 +4,7 @@ Look:
   * only the styles the renderer and the template itself use (see STYLES)
   * all text black Times New Roman; code is Courier New
   * Heading 1-4 are 12 pt bold and numbered 1., 1.1, 1.1.1, 1.1.1.1
+  * Appendix 1-4 look the same but are lettered A., A.1, A.1.1, A.1.1.1
   * every page, title page included, carries the document number, revision
     letter and release date in the header and footer, and the classification
     in red at the bottom
@@ -41,6 +42,7 @@ TEXT_WIDTH = 9360  # twips: Letter paper with 1 inch margins
 HEADING_NUM = 1
 BULLET_NUM = 2  # .. BULLET_NUM + LIST_LEVELS - 1
 NUMBER_NUM = BULLET_NUM + LIST_LEVELS
+APPENDIX_NUM = NUMBER_NUM + LIST_LEVELS
 
 
 def _fonts(name):
@@ -84,6 +86,15 @@ def _heading_styles():
                 f'<w:numId w:val="{HEADING_NUM}"/></w:numPr>'
                 f'<w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="{i}"/>',
             rpr=f"{_fonts(FONT)}<w:b/><w:bCs/>{_size(HEADING_SIZE)}",
+        )
+
+
+def _appendix_styles():
+    """Appendix N is Heading N with the lettered list, so it keeps its place in the TOC."""
+    for i in range(HEADING_LEVELS):
+        yield _style(
+            f"Appendix {i + 1}", based_on=f"Heading{i + 1}", next_style="Normal",
+            ppr=f'<w:numPr><w:ilvl w:val="{i}"/><w:numId w:val="{APPENDIX_NUM}"/></w:numPr>',
         )
 
 
@@ -131,6 +142,7 @@ STYLES = [
            extra=f"<w:tblPr>{_TABLE_MARGINS}</w:tblPr>"),
     _style("No List", kind="numbering", default=True),
     *_heading_styles(),
+    *_appendix_styles(),
     _style("Title", next_style="Normal",
            ppr='<w:spacing w:after="240"/><w:jc w:val="center"/>', rpr=f"<w:b/><w:bCs/>{_size(40)}"),
     _style("Subtitle", next_style="Normal",
@@ -196,12 +208,15 @@ def _level(ilvl, fmt, text, left, hanging=None, style=None, font=None):
 def set_numbering(doc):
     """Replace numbering.xml: heading numbers plus one list per list style."""
     # Level 1 is "1.", deeper levels are "1.1", "1.1.1", ...
-    heading_levels = [
-        _level(i, "decimal", ".".join(f"%{n + 1}" for n in range(i + 1)) + ("" if i else "."),
-               left=432 + 144 * i, style=f"Heading{i + 1}")
-        for i in range(HEADING_LEVELS)
-    ]
-    abstracts = [("multilevel", "".join(heading_levels))]
+    def outline(style, first_format):
+        return "".join(
+            _level(i, "decimal" if i else first_format,
+                   ".".join(f"%{n + 1}" for n in range(i + 1)) + ("" if i else "."),
+                   left=432 + 144 * i, style=f"{style}{i + 1}")
+            for i in range(HEADING_LEVELS)
+        )
+
+    abstracts = [("multilevel", outline("Heading", "decimal"))]
     bullets = (("", "Symbol"), ("o", MONO_FONT), ("", "Wingdings"))
     for i in range(LIST_LEVELS):
         n = str(i + 1) if i else ""
@@ -212,7 +227,8 @@ def set_numbering(doc):
         n = str(i + 1) if i else ""
         abstracts.append(("singleLevel", _level(0, "decimal", "%1.", 360 * (i + 1), 360,
                                                  f"ListNumber{n}")))
-    # Order above matches HEADING_NUM, BULLET_NUM.., NUMBER_NUM..
+    abstracts.append(("multilevel", outline("Appendix", "upperLetter")))
+    # Order above matches HEADING_NUM, BULLET_NUM.., NUMBER_NUM.., APPENDIX_NUM
     xml = "".join(
         f'<w:abstractNum w:abstractNumId="{i}"><w:multiLevelType w:val="{kind}"/>{levels}'
         f"</w:abstractNum>" for i, (kind, levels) in enumerate(abstracts, 1)
@@ -257,6 +273,8 @@ def instructions_page(doc):
     )
     for level in range(1, HEADING_LEVELS + 1):
         doc.add_paragraph(f"Heading {level} sample", style=f"Heading {level}")
+    for level in range(1, HEADING_LEVELS + 1):
+        doc.add_paragraph(f"Appendix {level} sample", style=f"Appendix {level}")
     doc.add_paragraph("Normal paragraph sample.", style="Normal")
     for kind in ("List Bullet", "List Number", "List Continue"):
         for i in range(LIST_LEVELS):

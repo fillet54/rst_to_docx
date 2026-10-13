@@ -59,6 +59,7 @@ page for each style the renderer uses:
 RST                    Word style
 =====================  ====================================================
 section titles         Heading 1 … Heading N (the first level is always Heading 1)
+appendix titles        Appendix 1 … Appendix N (custom styles; else Heading N)
 paragraphs             Normal
 bullet / numbered      List Bullet [2, 3…] / List Number [2, 3…]
 2nd+ para in an item   List Continue [2, 3…]
@@ -109,6 +110,13 @@ Roles and directives
    the section title.
 
 ``:underline:`text```, ``:strike:`text```
+
+``.. appendix::``
+   Put this before the first appendix section. Every section after it uses
+   the ``Appendix N`` styles instead of ``Heading N``, which the sample
+   template letters A., A.1, A.1.1. To do the same in your own template,
+   create ``Appendix 1`` … based on the heading styles and link them to a
+   multilevel list whose first level is A, B, C.
 
 ``.. var-table:: path``
    A table built from a list of dicts (or objects) in ``variables``::

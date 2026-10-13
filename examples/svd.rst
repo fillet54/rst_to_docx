@@ -88,3 +88,27 @@ Installation
 .. warning::
 
    Do **not** interrupt the installer while it updates firmware.
+
+.. appendix::
+
+Acronyms
+========
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - Acronym
+     - Meaning
+   * - SVD
+     - Software Version Description
+   * - SRS
+     - Software Requirements Specification
+
+Build Log
+=========
+
+Compiler Output
+---------------
+
+The release build completed with no warnings.

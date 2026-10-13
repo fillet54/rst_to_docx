@@ -15,6 +15,7 @@ Roles
 
 Directives
     .. var-table:: files       table built from a list of dicts
+    .. appendix::              sections from here on are appendices (A., A.1, ...)
 """
 
 import re
@@ -36,6 +37,10 @@ _JIRA_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 
 class ref_node(nodes.Inline, nodes.TextElement):
     """Unresolved :ref: cross-reference; resolved in api._resolve_refs."""
+
+
+class appendix_marker(nodes.Invisible, nodes.Element):
+    """Emitted by ``.. appendix::``; sections after it use the Appendix N styles."""
 
 
 def _split_explicit_title(text):
@@ -226,6 +231,13 @@ class VarTable(Directive):
         return para
 
 
+class Appendix(Directive):
+    """Mark where the appendices start. Goes right before the first appendix section."""
+
+    def run(self):
+        return [appendix_marker()]
+
+
 def register():
     roles.register_local_role("var", var_role)
     roles.register_local_role("jira", jira_role)
@@ -233,3 +245,4 @@ def register():
     roles.register_local_role("underline", _class_role("underline"))
     roles.register_local_role("strike", _class_role("strike"))
     directives.register_directive("var-table", VarTable)
+    directives.register_directive("appendix", Appendix)

@@ -27,7 +27,7 @@ from docx.text.run import Run
 
 from . import styles as S
 from .errors import UnsupportedNodeError
-from .extensions import ref_node
+from .extensions import appendix_marker, ref_node
 from .numbering import Numbering, set_paragraph_numbering
 
 MONO_FONT = "Courier New"
@@ -132,6 +132,7 @@ class Renderer:
         self.run_parent = None    # element new runs go into (w:p or w:hyperlink)
         self.fmt = {}
         self.section_depth = 0
+        self.in_appendix = False  # set by ".. appendix::"
         self.pending_ids = []
         self._bookmarks = {}
         self._next_bookmark_id = 1 + max(
@@ -290,10 +291,15 @@ def _section(renderer, node):
         renderer.section_depth -= 1
 
 
+@register_handler(appendix_marker)
+def _appendix_marker(renderer, node):
+    renderer.in_appendix = True
+
+
 @register_handler(nodes.title)
 def _title(renderer, node):
     if isinstance(node.parent, nodes.section):
-        chain = S.heading_chain(renderer.section_depth)
+        chain = (S.appendix_chain if renderer.in_appendix else S.heading_chain)(renderer.section_depth)
     elif isinstance(node.parent, nodes.table):
         chain = ["Caption", "Normal"]
     else:

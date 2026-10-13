@@ -23,6 +23,11 @@ def heading_chain(level):
     return [f"Heading {n}" for n in range(max(level, 1), 0, -1)] + ["Normal"]
 
 
+def appendix_chain(level):
+    """Appendix N styles, falling back to the ordinary headings."""
+    return [f"Appendix {n}" for n in range(max(level, 1), 0, -1)] + heading_chain(level)
+
+
 def _numbered_chain(base, level, final):
     return [f"{base} {n}" for n in range(level, 1, -1)] + [base, *final]
 

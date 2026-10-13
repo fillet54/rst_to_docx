@@ -173,6 +173,27 @@ def test_var_role():
     assert texts(doc) == ["Version 1.4.2 of Widget."]
 
 
+def test_appendix_sections_use_lettered_styles(template):
+    rst = "Top\n===\n\nSub\n---\n\n.. appendix::\n\nExtra\n=====\n\nDetail\n------\n\nx\n"
+    doc = do_render(rst, template)
+    styles = {p.text: p.style for p in doc.paragraphs}
+    assert [styles[t].name for t in ("Top", "Sub", "Extra", "Detail")] == [
+        "Heading 1", "Heading 2", "Appendix 1", "Appendix 2"]
+    numbering = doc.part.numbering_part.element
+    num_pr = styles["Extra"].element.pPr.numPr
+    abstract_id = numbering.num_having_numId(num_pr.numId.val).abstractNumId.val
+    formats = numbering.xpath(f"w:abstractNum[@w:abstractNumId={abstract_id}]/w:lvl/w:numFmt/@w:val")
+    assert formats[:2] == ["upperLetter", "decimal"]
+    assert styles["Extra"].font.size is None and styles["Extra"].base_style.name == "Heading 1"
+
+
+def test_appendix_falls_back_to_headings_without_the_styles():
+    with pytest.warns(MissingStyleWarning, match="Appendix 1"):
+        doc = do_render(".. appendix::\n\nExtra\n=====\n\nx\n", simple_template(["{{content}}"]),
+                        strip_instructions=False)
+    assert doc.paragraphs[0].style.name == "Heading 1"
+
+
 def test_var_lists_and_attributes():
     class Obj:
         name = "attr"
