@@ -54,7 +54,8 @@ def main():
     variables = {
         "project": "Widget Controller",
         "release": {"version": "1.4.2", "previous": "1.4.1", "date": "2026-10-13"},
-        "doc": {"number": "SVD-WC-0042", "author": "Release Engineering",
+        "doc": {"number": "SVD-WC-0042", "revision": "A", "classification": "UNCLASSIFIED",
+                "author": "Release Engineering",
                 "srs": "SRS-WC-0007", "sdd": "SDD-WC-0011"},
         "build": {"compiler": "GCC 13.2", "commit": "57eb69e", "id": "1832"},
         "files": file_records(dist) if dist else SAMPLE_FILES,

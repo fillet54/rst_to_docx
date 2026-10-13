@@ -18,7 +18,7 @@ from make_template import build  # noqa: E402
 VARS = {
     "project": "Widget",
     "release": {"version": "1.4.2", "date": "2026-10-13"},
-    "doc": {"number": "SVD-1", "author": "QA"},
+    "doc": {"number": "SVD-1", "revision": "B", "classification": "UNCLASSIFIED", "author": "QA"},
 }
 JIRA = "https://jira.example.com/browse/"
 
@@ -101,10 +101,35 @@ def test_content_inserted_at_marker_position():
 def test_placeholders_in_cover_table_and_header(template):
     doc = do_render("x", template)
     cover = doc.tables[0]
-    assert cover.cell(1, 1).text == "1.4.2"
+    assert cover.cell(2, 1).text == "1.4.2"
     assert "Widget" in texts(doc)
-    assert doc.sections[0].header.paragraphs[0].text == "Widget SVD — SVD-1"
-    assert doc.sections[0].footer.paragraphs[0].text.startswith("Version 1.4.2")
+    section = doc.sections[0]
+    assert not section.different_first_page_header_footer  # the title page gets them too
+    assert section.header.paragraphs[0].text == "SVD-1\tRevision B\t2026-10-13"
+    info, marking = section.footer.paragraphs
+    assert info.text.startswith("SVD-1 Rev B\t2026-10-13\tPage ")
+    assert marking.text == "UNCLASSIFIED"
+    assert str(marking.runs[0].font.color.rgb) == "FF0000"
+
+
+def test_template_styles_are_minimal_black_and_numbered(template):
+    doc = docx.Document(template)
+    used = {p.style.name for p in doc.paragraphs} | {"Table Grid", "Hyperlink", "HTML Code"}
+    builtin_defaults = {"Normal", "Default Paragraph Font", "Normal Table", "No List"}
+    toc_and_page = {"toc 1", "toc 2", "toc 3", "Header", "Footer"}
+    assert {s.name for s in doc.styles} == used | builtin_defaults | toc_and_page
+    # Black comes from the document defaults; no style overrides it.
+    styles = doc.styles.element
+    assert [c.get(qn("w:val")) for c in styles.iter(qn("w:color"))] == ["000000"]
+    numbering = doc.part.numbering_part.element
+    for level, text in enumerate(["%1.", "%1.%2", "%1.%2.%3"]):
+        heading = doc.styles[f"Heading {level + 1}"]
+        assert heading.font.name == "Times New Roman" and heading.font.size.pt == 12
+        num_pr = heading.element.pPr.numPr
+        abstract_id = numbering.num_having_numId(num_pr.numId.val).abstractNumId.val
+        lvl = numbering.xpath(
+            f"w:abstractNum[@w:abstractNumId={abstract_id}]/w:lvl[@w:ilvl={num_pr.ilvl.val}]")[0]
+        assert lvl.find(qn("w:lvlText")).get(qn("w:val")) == text
 
 
 def test_placeholder_split_across_runs():

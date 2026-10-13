@@ -27,8 +27,14 @@ docutils 0.18.1+.
 The template
 ============
 
-``examples/make_template.py`` builds a sample template. In practice you
-design the template in Word using these markers:
+``examples/make_template.py`` builds a sample template: only the styles
+listed below, black Times New Roman text, 12 pt headings numbered 1., 1.1,
+1.1.1, and a header and footer on every page (title page included) with the
+document number, revision letter and release date, plus the classification
+in red at the bottom. It expects ``doc.number``, ``doc.revision``,
+``doc.classification``, ``doc.author``, ``release.version``,
+``release.date`` and ``project`` in ``variables``. In practice you design
+the template in Word using these markers:
 
 ``{{end-instructions}}``
    A paragraph containing only this text ends the instructions page.
