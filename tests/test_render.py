@@ -8,7 +8,7 @@ import pytest
 from docx.oxml.ns import qn
 
 from rst_to_docx import (
-    MissingStyleWarning, RstError, TemplateError, UndefinedVariableError,
+    MissingStyleWarning, RstError, RstWarning, TemplateError, UndefinedVariableError,
     UnsupportedNodeError, render,
 )
 
@@ -486,6 +486,37 @@ def test_jira_role_requires_url_and_valid_key():
 def test_external_link(template):
     doc = do_render("See `docs <https://example.com/x>`_.", template)
     assert "https://example.com/x" in {r.target_ref for r in doc.part.rels.values() if r.is_external}
+
+
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///etc/passwd", "//host/share/x.exe",
+                                 "docs/readme.html"])
+def test_unsafe_link_schemes_rejected(url):
+    with pytest.raises(UnsupportedNodeError, match="only http, https, mailto"):
+        render(f"`x <{url}>`_", simple_template(["{{content}}"]), strip_instructions=False)
+
+
+def test_mailto_link_allowed():
+    doc = do_render("`x <mailto:a@example.com>`_", simple_template(["{{content}}"]),
+                    strip_instructions=False)
+    assert "mailto:a@example.com" in {r.target_ref for r in doc.part.rels.values() if r.is_external}
+
+
+def test_file_insertion_off_by_default(tmp_path):
+    (tmp_path / "secret.txt").write_text("top secret")
+    include = f".. include:: {tmp_path / 'secret.txt'}\n"
+    for rst in (include, f".. csv-table::\n   :file: {tmp_path / 'secret.txt'}\n"):
+        with pytest.warns(RstWarning, match="disabled|deactivated"):
+            doc = do_render(rst, simple_template(["{{content}}"]), strip_instructions=False)
+        assert "top secret" not in body_xml(doc)
+    doc = do_render(include, simple_template(["{{content}}"]), strip_instructions=False,
+                    file_insertion=True)
+    assert texts(doc) == ["top secret"]
+
+
+def test_raw_directive_disabled():
+    with pytest.warns(RstWarning, match="disabled"):
+        do_render(".. raw:: html\n\n   <b>x</b>\n", simple_template(["{{content}}"]),
+                  strip_instructions=False)
 
 
 def test_internal_refs_point_at_bookmarks(template):

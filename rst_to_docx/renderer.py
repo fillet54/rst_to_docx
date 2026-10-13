@@ -17,6 +17,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from urllib.parse import urlsplit
 
 from docutils import nodes
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -32,6 +33,9 @@ from .numbering import Numbering, set_paragraph_numbering
 
 MONO_FONT = "Courier New"
 LINK_COLOR = RGBColor(0x05, 0x63, 0xC1)
+# Anything else (file:, javascript:, UNC paths, ...) could run or open something
+# on the reader's machine when clicked.
+LINK_SCHEMES = {"http", "https", "mailto"}
 RUN_FLAGS = ("bold", "italic", "underline", "strike", "superscript", "subscript")
 INLINE_CLASSES = {"underline", "strike"}  # classes set by the :underline:/:strike: roles
 W_TBL = qn("w:tbl")
@@ -234,7 +238,7 @@ class Renderer:
         if node_id not in self._bookmarks:
             name = "_r2d_" + re.sub(r"\W", "_", node_id, flags=re.ASCII)
             if len(name) > 40:
-                name = f"{name[:31]}_{hashlib.sha1(node_id.encode()).hexdigest()[:8]}"
+                name = f"{name[:31]}_{hashlib.sha256(node_id.encode()).hexdigest()[:8]}"
             self._bookmarks[node_id] = name
         return self._bookmarks[node_id]
 
@@ -517,6 +521,9 @@ def _inline(renderer, node):
 def _reference(renderer, node):
     # ref_node (:ref:) gets its refid from api._resolve_refs before rendering.
     if "refuri" in node:
+        if urlsplit(node["refuri"]).scheme.lower() not in LINK_SCHEMES:
+            raise UnsupportedNodeError(
+                node, f"link to {node['refuri']!r}: only {', '.join(sorted(LINK_SCHEMES))} links are allowed")
         link = renderer.hyperlink(url=node["refuri"])
     elif "refid" in node:
         link = renderer.hyperlink(anchor_id=node["refid"])

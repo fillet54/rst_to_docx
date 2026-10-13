@@ -17,7 +17,7 @@ from .template import (
 
 
 def parse(source: str, *, variables: dict | None = None, jira_url: str | None = None,
-          source_path: str | None = None) -> nodes.document:
+          source_path: str | None = None, file_insertion: bool = False) -> nodes.document:
     """Parse RST into a docutils doctree, raising RstError on any error-level problem."""
     settings = {
         "doctitle_xform": False,      # the first heading level is always Heading 1
@@ -26,6 +26,9 @@ def parse(source: str, *, variables: dict | None = None, jira_url: str | None = 
         "smart_quotes": True,
         "syntax_highlight": "none",
         "raw_enabled": False,
+        # Off by default: "include" and "csv-table :file:/:url:" let the RST read
+        # any file the process can, or fetch any URL.
+        "file_insertion_enabled": file_insertion,
         "input_encoding": "utf-8",
         "report_level": 2,            # keep warnings and errors in the tree...
         "halt_level": 5,              # ...without raising on the first one
@@ -70,7 +73,8 @@ def _resolve_refs(doctree, source_path):
 
 def render(source: str | os.PathLike, template, output=None, *, variables: dict | None = None,
            jira_url: str | None = None, strip_instructions: bool = True,
-           update_fields: bool | None = None, source_path: str | None = None) -> Document:
+           update_fields: bool | None = None, source_path: str | None = None,
+           file_insertion: bool = False) -> Document:
     """Render reStructuredText into a Word template.
 
     :param source: RST text, or a path-like object pointing at an .rst file.
@@ -87,6 +91,9 @@ def render(source: str | os.PathLike, template, output=None, *, variables: dict 
         ``None`` (default) does so only when the template contains fields.
     :param source_path: file name used in error messages and for resolving
         relative paths (``include``, ``csv-table :file:``) when ``source`` is text.
+    :param file_insertion: allow ``include`` and ``csv-table :file:``/``:url:``.
+        Off by default because they read any file the process can, or fetch
+        any URL; turn it on only for RST you trust.
     :returns: the python-docx Document.
     """
     if isinstance(source, os.PathLike):
@@ -95,7 +102,8 @@ def render(source: str | os.PathLike, template, output=None, *, variables: dict 
             source = fh.read()
     variables = variables or {}
 
-    doctree = parse(source, variables=variables, jira_url=jira_url, source_path=source_path)
+    doctree = parse(source, variables=variables, jira_url=jira_url, source_path=source_path,
+                    file_insertion=file_insertion)
 
     document = template if isinstance(template, Document) else docx.Document(template)
     if strip_instructions:

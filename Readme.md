@@ -164,6 +164,23 @@ node types, register a renderer:
            with renderer.formatting(bold=True):
                renderer.render_children(node)
 
+Security
+========
+
+The RST source and the template are treated as untrusted input:
+
+* ``raw`` is disabled, and so are ``include`` and ``csv-table``
+  ``:file:``/``:url:``, which would let a document read local files or fetch
+  URLs. Pass ``file_insertion=True`` to ``render`` for RST you trust.
+* Links may only use ``http``, ``https`` or ``mailto``. Anything else
+  (``file:``, ``javascript:``, UNC paths) raises ``UnsupportedNodeError``.
+* XML is parsed by python-docx with entity resolution off, and all text goes
+  into the document through the XML API, never by string concatenation.
+* ``variables`` lookups never reach attributes whose name starts with ``_``.
+
+The paths passed to ``render`` (source, template, output) are opened as
+given. Validating them is the caller's job.
+
 Tests
 =====
 
