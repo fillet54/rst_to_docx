@@ -20,12 +20,11 @@ MONOSPACE_PARAGRAPH_STYLES = ("Plain Text", "Macro Text", "HTML Preformatted")
 
 
 def heading_chain(level):
-    return ["Heading %d" % n for n in range(level, 0, -1)] + ["Normal"]
+    return [f"Heading {n}" for n in range(max(level, 1), 0, -1)] + ["Normal"]
 
 
 def _numbered_chain(base, level, final):
-    chain = ["%s %d" % (base, n) for n in range(level, 1, -1)] + [base]
-    return chain + list(final)
+    return [f"{base} {n}" for n in range(level, 1, -1)] + [base, *final]
 
 
 def list_chain(kind, level):
@@ -54,19 +53,17 @@ class StyleResolver:
         key = (tuple(chain), style_type)
         if key in self._cache:
             return self._cache[key]
-        found = None
-        for name in chain:
-            style = self._lookup(name, style_type)
-            if style is not None:
-                found = style
-                break
+        found = next(
+            (style for name in chain if (style := self._lookup(name, style_type)) is not None),
+            None,
+        )
         wanted = chain[0]
         if (found is None or found.name != wanted) and wanted not in self._warned:
             self._warned.add(wanted)
             fallback = repr(found.name) if found is not None else "direct formatting"
             warnings.warn(
-                "style %r not found in template; using %s. Use the style once on "
-                "the template's instructions page so Word saves it." % (wanted, fallback),
+                f"style {wanted!r} not found in template; using {fallback}. Use the style "
+                f"once on the template's instructions page so Word saves it.",
                 MissingStyleWarning,
                 stacklevel=4,
             )
@@ -78,6 +75,4 @@ class StyleResolver:
             style = self.document.styles[name]
         except KeyError:
             return None
-        if style.type != style_type:
-            return None
-        return style
+        return style if style.type == style_type else None

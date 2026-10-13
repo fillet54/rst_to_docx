@@ -50,7 +50,8 @@ def do_render(rst, template, **kw):
 
 
 def texts(doc):
-    return [p.text for p in doc.paragraphs]
+    # paragraph.text skips hyperlink runs in python-docx < 1.0; read all w:t instead.
+    return ["".join(t.text or "" for t in p._p.iter(qn("w:t"))) for p in doc.paragraphs]
 
 
 def body_xml(doc):
@@ -255,6 +256,18 @@ def test_lists_fall_back_to_generated_numbering():
         doc = do_render("a. x\nb. y\n", d, strip_instructions=False)
     assert _num_id(doc.paragraphs[0]) is not None
     assert "lowerLetter" in doc.part.numbering_part.element.xml
+
+
+def test_lists_in_template_without_numbering_part():
+    d = docx.Document()
+    rel_id = next(r.rId for r in d.part.rels.values() if r.reltype.endswith("/numbering"))
+    d.part.drop_rel(rel_id)
+    d.add_paragraph("{{content}}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        doc = do_render("* a\n\n#. b\n", d, strip_instructions=False)
+    assert _num_id(doc.paragraphs[0]) is not None
+    assert _num_id(doc.paragraphs[1]) is not None
 
 
 def test_admonitions_render_as_boxes_and_stay_separate(template):

@@ -14,10 +14,8 @@ class RstError(RstToDocxError):
 
     def __init__(self, messages):
         self.messages = list(messages)
-        super().__init__(
-            "RST source has %d error(s):\n  %s"
-            % (len(self.messages), "\n  ".join(self.messages))
-        )
+        details = "\n  ".join(self.messages)
+        super().__init__(f"RST source has {len(self.messages)} error(s):\n  {details}")
 
 
 class UnsupportedNodeError(RstToDocxError):
@@ -25,11 +23,8 @@ class UnsupportedNodeError(RstToDocxError):
 
     def __init__(self, node, context=None):
         self.node = node
-        where = _location(node)
-        msg = "unsupported RST element <%s>%s" % (node.tagname, where)
-        if context:
-            msg += " (%s)" % context
-        super().__init__(msg)
+        msg = f"unsupported RST element <{node.tagname}>{_location(node)}"
+        super().__init__(f"{msg} ({context})" if context else msg)
 
 
 class TemplateError(RstToDocxError):
@@ -41,9 +36,7 @@ class UndefinedVariableError(RstToDocxError):
 
     def __init__(self, names):
         self.names = list(names)
-        super().__init__(
-            "template references undefined variable(s): %s" % ", ".join(self.names)
-        )
+        super().__init__(f"template references undefined variable(s): {', '.join(self.names)}")
 
 
 class MissingStyleWarning(UserWarning):
@@ -55,12 +48,9 @@ class RstWarning(UserWarning):
 
 
 def _location(node):
-    line = None
-    source = None
-    while node is not None and line is None:
-        line = getattr(node, "line", None)
-        source = source or getattr(node, "source", None)
+    """`` at <source>:<line>`` for the node or its nearest ancestor with a line."""
+    while node is not None:
+        if getattr(node, "line", None) is not None:
+            return f" at {getattr(node, 'source', None) or '<string>'}:{node.line}"
         node = getattr(node, "parent", None)
-    if line is None:
-        return ""
-    return " at %s:%s" % (source or "<string>", line)
+    return ""

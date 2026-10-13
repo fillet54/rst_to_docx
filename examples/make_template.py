@@ -20,28 +20,27 @@ import docx
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
+from docx.oxml.ns import nsdecls, qn
 from docx.shared import Pt, RGBColor
 
 HEADING_LEVELS = 4
 
 
 def add_missing_builtin_styles(doc):
-    styles = doc.styles
-    if "Plain Text" not in [s.name for s in styles]:
-        s = styles.add_style("Plain Text", WD_STYLE_TYPE.PARAGRAPH)
-        s.base_style = styles["Normal"]
-        s.font.name = "Consolas"
-        s.font.size = Pt(9)
-        s.paragraph_format.space_after = Pt(6)
-    if "Hyperlink" not in [s.name for s in styles]:
-        s = styles.add_style("Hyperlink", WD_STYLE_TYPE.CHARACTER)
-        s.font.color.rgb = RGBColor(0x05, 0x63, 0xC1)
-        s.font.underline = True
-    if "HTML Code" not in [s.name for s in styles]:
-        s = styles.add_style("HTML Code", WD_STYLE_TYPE.CHARACTER)
-        s.font.name = "Consolas"
-        s.font.size = Pt(9.5)
+    """Add built-in styles the python-docx default template lacks."""
+    plain = doc.styles.add_style("Plain Text", WD_STYLE_TYPE.PARAGRAPH)
+    plain.base_style = doc.styles["Normal"]
+    plain.font.name = "Consolas"
+    plain.font.size = Pt(9)
+    plain.paragraph_format.space_after = Pt(6)
+
+    link = doc.styles.add_style("Hyperlink", WD_STYLE_TYPE.CHARACTER)
+    link.font.color.rgb = RGBColor(0x05, 0x63, 0xC1)
+    link.font.underline = True
+
+    code = doc.styles.add_style("HTML Code", WD_STYLE_TYPE.CHARACTER)
+    code.font.name = "Consolas"
+    code.font.size = Pt(9.5)
 
 
 def number_headings(doc):
@@ -50,21 +49,21 @@ def number_headings(doc):
     abstract_id = 900
     levels = []
     for i in range(HEADING_LEVELS):
-        text = ".".join("%%%d" % (n + 1) for n in range(i + 1))
+        text = ".".join(f"%{n + 1}" for n in range(i + 1))
+        indent = 432 + 144 * i
         levels.append(
-            '<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
-            '<w:pStyle w:val="Heading%d"/><w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="%d" w:hanging="%d"/></w:pPr></w:lvl>'
-            % (i, i + 1, text, 432 + 144 * i, 432 + 144 * i)
+            f'<w:lvl w:ilvl="{i}"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            f'<w:pStyle w:val="Heading{i + 1}"/><w:lvlText w:val="{text}"/><w:lvlJc w:val="left"/>'
+            f'<w:pPr><w:ind w:left="{indent}" w:hanging="{indent}"/></w:pPr></w:lvl>'
         )
     abstract = parse_xml(
-        '<w:abstractNum %s w:abstractNumId="%d"><w:multiLevelType w:val="multilevel"/>%s'
-        "</w:abstractNum>" % (nsdecls("w"), abstract_id, "".join(levels))
+        f'<w:abstractNum {nsdecls("w")} w:abstractNumId="{abstract_id}">'
+        f'<w:multiLevelType w:val="multilevel"/>{"".join(levels)}</w:abstractNum>'
     )
-    numbering.find(abstract.tag.replace("abstractNum", "num")).addprevious(abstract)
+    numbering.find(qn("w:num")).addprevious(abstract)  # abstractNums precede nums
     num_id = numbering.add_num(abstract_id).numId
     for i in range(HEADING_LEVELS):
-        numPr = doc.styles["Heading %d" % (i + 1)].element.get_or_add_pPr().get_or_add_numPr()
+        numPr = doc.styles[f"Heading {i + 1}"].element.get_or_add_pPr().get_or_add_numPr()
         numPr.get_or_add_ilvl().val = i
         numPr.get_or_add_numId().val = num_id
     # TOC Heading is based on Heading 1; numId 0 switches the numbering off.
@@ -72,15 +71,15 @@ def number_headings(doc):
 
 
 def add_field(paragraph, instr, placeholder=""):
-    p = paragraph._p
-    for xml in (
-        '<w:r %s><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>',
-        '<w:r %s><w:instrText xml:space="preserve"> ' + instr + " </w:instrText></w:r>",
-        '<w:r %s><w:fldChar w:fldCharType="separate"/></w:r>',
-        '<w:r %s><w:t xml:space="preserve">' + placeholder + "</w:t></w:r>",
-        '<w:r %s><w:fldChar w:fldCharType="end"/></w:r>',
-    ):
-        p.append(parse_xml(xml % nsdecls("w")))
+    """Append a complex field (e.g. TOC, PAGE) showing ``placeholder`` until updated."""
+    def field_run(child):
+        paragraph._p.append(parse_xml(f"<w:r {nsdecls('w')}>{child}</w:r>"))
+
+    field_run('<w:fldChar w:fldCharType="begin" w:dirty="true"/>')
+    field_run(f'<w:instrText xml:space="preserve"> {instr} </w:instrText>')
+    field_run('<w:fldChar w:fldCharType="separate"/>')
+    paragraph.add_run(placeholder)
+    field_run('<w:fldChar w:fldCharType="end"/>')
 
 
 def instructions_page(doc):
@@ -97,11 +96,11 @@ def instructions_page(doc):
         "replaced from the variables dict."
     )
     for level in range(1, HEADING_LEVELS + 1):
-        doc.add_paragraph("Heading %d sample" % level, style="Heading %d" % level)
+        doc.add_paragraph(f"Heading {level} sample", style=f"Heading {level}")
     doc.add_paragraph("Normal paragraph sample.", style="Normal")
     for kind in ("List Bullet", "List Number", "List Continue"):
         for n in ("", " 2", " 3"):
-            doc.add_paragraph("%s%s sample" % (kind, n), style=kind + n)
+            doc.add_paragraph(f"{kind}{n} sample", style=kind + n)
     doc.add_paragraph("Plain Text (literal block) sample", style="Plain Text")
     doc.add_paragraph("Caption (table title) sample", style="Caption")
     doc.add_paragraph("Quote sample", style="Quote")

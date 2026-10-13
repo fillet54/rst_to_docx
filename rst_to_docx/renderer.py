@@ -1,18 +1,22 @@
 """Walks a docutils doctree and writes python-docx content before an anchor.
 
-Dispatch is by node class through a handler registry (see :func:`register_handler`),
-so callers can add renderers for their own docutils nodes. A handler is
-``handler(renderer, node)`` and uses the renderer's helpers:
+Dispatch is by node class through a handler registry, so callers can add
+renderers for their own docutils nodes::
 
-* ``renderer.new_paragraph(style_chain)`` - add a paragraph in the current container
-* ``renderer.add_text(text)`` - add a run with the current inline formatting
-* ``renderer.formatting(**flags)`` - context manager for inline formatting
-* ``renderer.render_children(node)`` - recurse
+    @register_handler(MyNode)
+    def render_my_node(renderer, node):
+        with renderer.inline_paragraph("Normal"), renderer.formatting(bold=True):
+            renderer.render_children(node)
+
+Handlers use the renderer's helpers: ``inline_paragraph``, ``add_text``,
+``formatting``, ``render`` and ``render_children``.
 """
 
 import hashlib
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
 
 from docutils import nodes
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -24,33 +28,28 @@ from docx.text.run import Run
 from . import styles as S
 from .errors import UnsupportedNodeError
 from .extensions import ref_node
-from .numbering import Numbering, set_paragraph_numbering, style_numbering
+from .numbering import Numbering, set_paragraph_numbering
+
+MONO_FONT = "Courier New"
+LINK_COLOR = RGBColor(0x05, 0x63, 0xC1)
+RUN_FLAGS = ("bold", "italic", "underline", "strike", "superscript", "subscript")
+INLINE_CLASSES = {"underline", "strike"}  # classes set by the :underline:/:strike: roles
+W_TBL = qn("w:tbl")
 
 _handlers = {}
 
-MONO_FONT = "Courier New"
-ADMONITIONS = (
-    nodes.attention, nodes.caution, nodes.danger, nodes.error, nodes.hint,
-    nodes.important, nodes.note, nodes.tip, nodes.warning,
-)
 
-
-def register_handler(node_class, handler=None):
-    """Register ``handler(renderer, node)`` for ``node_class`` (usable as a decorator)."""
-    if handler is None:
-        def decorator(fn):
-            _handlers[node_class] = fn
-            return fn
-        return decorator
-    _handlers[node_class] = handler
-    return handler
+def register_handler(*node_classes):
+    """Decorator registering ``handler(renderer, node)`` for the given node classes."""
+    def decorator(handler):
+        for cls in node_classes:
+            _handlers[cls] = handler
+        return handler
+    return decorator
 
 
 def handler_for(node):
-    for cls in type(node).__mro__:
-        if cls in _handlers:
-            return _handlers[cls]
-    return None
+    return next((_handlers[cls] for cls in type(node).__mro__ if cls in _handlers), None)
 
 
 # -- containers ------------------------------------------------------------------
@@ -69,7 +68,7 @@ class AnchorContainer:
     def add_table(self, rows, cols):
         # Word merges directly adjacent tables into one; keep them apart.
         prev = self.anchor._p.getprevious()
-        if prev is not None and prev.tag == qn("w:tbl"):
+        if prev is not None and prev.tag == W_TBL:
             self.add_paragraph()
         table = self.document.add_table(rows, cols)
         self.anchor._p.addprevious(table._tbl)
@@ -82,79 +81,76 @@ class AnchorContainer:
 
 
 class CellContainer:
-    """Block content inside a table cell (reuses the cell's initial empty paragraph)."""
+    """Block content inside a table cell.
+
+    A cell always ends with a paragraph, so an empty trailing paragraph (the
+    cell's initial one, or the one python-docx adds after a nested table) is
+    reused by the next ``add_paragraph`` instead of leaving a blank line.
+    """
 
     def __init__(self, cell):
         self.cell = cell
-        self._reusable = cell.paragraphs[0] if not cell.paragraphs[0].text else None
+        self._spare = cell.paragraphs[0]
 
     def add_paragraph(self):
-        if self._reusable is not None:
-            p, self._reusable = self._reusable, None
-            return p
-        return self.cell.add_paragraph()
+        if self._spare is None:
+            return self.cell.add_paragraph()
+        para, self._spare = self._spare, None
+        return para
 
     def add_table(self, rows, cols):
-        if self._reusable is not None:
-            # python-docx appends tables after existing content; drop the unused
-            # leading paragraph so the cell doesn't start with a blank line.
-            p = self._reusable._p
-            self._reusable = None
-            table = self.cell.add_table(rows, cols)
-            p.getparent().remove(p)
-        else:
-            last = self.cell._tc[-1]
-            if last.tag == qn("w:tbl"):
-                self.cell.add_paragraph()
-            table = self.cell.add_table(rows, cols)
-        # Cells must end with a paragraph; python-docx added one, reuse it next.
-        self._reusable = self.cell.paragraphs[-1]
+        spare, self._spare = self._spare, None
+        if spare is None and self.cell._tc[-1].tag == W_TBL:
+            self.cell.add_paragraph()
+        table = self.cell.add_table(rows, cols)
+        if spare is not None:
+            spare._p.getparent().remove(spare._p)
+        self._spare = self.cell.paragraphs[-1]
         return table
-
-    @property
-    def width(self):
-        return self.cell.width
 
 
 # -- renderer --------------------------------------------------------------------
 
 
+@dataclass
 class _ListState:
-    def __init__(self, kind, depth, num_id=None, ilvl=0):
-        self.kind = kind
-        self.depth = depth
-        self.num_id = num_id
-        self.ilvl = ilvl
-        self.first_paragraph = False
+    style_chain: list
+    depth: int
+    num_id: int | None = None  # None: the paragraph style supplies numbering
+    ilvl: int = 0
+    first_paragraph: bool = False
 
 
 class Renderer:
-    def __init__(self, document, anchor, doctree):
+    def __init__(self, document, anchor):
         self.document = document
-        self.doctree = doctree
         self.styles = S.StyleResolver(document)
         self.numbering = Numbering(document)
         self.containers = [AnchorContainer(document, anchor)]
-        self.contexts = []          # "cell" or _ListState, innermost last
-        self.paragraph = None       # current python-docx Paragraph (inline mode)
-        self.run_parent = None      # element runs are appended to (w:p or w:hyperlink)
+        self.contexts = []        # "cell" or _ListState, innermost last
+        self.paragraph = None     # current Paragraph while rendering inline content
+        self.run_parent = None    # element new runs go into (w:p or w:hyperlink)
         self.fmt = {}
         self.section_depth = 0
         self.pending_ids = []
-        self._bookmark_id = self._max_bookmark_id() + 1
         self._bookmarks = {}
-
-    # -- public helpers ------------------------------------------------------
+        self._next_bookmark_id = 1 + max(
+            (int(b.get(qn("w:id"), 0)) for b in document.element.body.iter(qn("w:bookmarkStart"))),
+            default=0,
+        )
 
     @property
     def container(self):
         return self.containers[-1]
 
+    @property
+    def context(self):
+        return self.contexts[-1] if self.contexts else None
+
     def render(self, node):
         if isinstance(node, nodes.Element) and node.get("ids"):
             self.pending_ids.extend(node["ids"])
-            if self.paragraph is not None:
-                self._emit_bookmarks()
+            self._emit_bookmarks()
         handler = handler_for(node)
         if handler is None:
             raise UnsupportedNodeError(node)
@@ -164,31 +160,23 @@ class Renderer:
         for child in node.children:
             self.render(child)
 
-    def new_paragraph(self, style_chain=None):
-        para = self.container.add_paragraph()
-        if style_chain:
-            style = self.styles.get(style_chain)
-            if style is not None:
-                para.style = style
-        self.paragraph = para
-        self.run_parent = para._p
-        self._emit_bookmarks()
-        return para
-
     @contextmanager
     def inline_paragraph(self, style_chain=None):
-        """Open a paragraph, render inline content into it, then close it."""
-        para = self.new_paragraph(style_chain)
+        """Add a paragraph and direct inline content into it until the block exits."""
+        para = self.container.add_paragraph()
+        if style_chain and (style := self.styles.get(style_chain)) is not None:
+            para.style = style
+        self.paragraph, self.run_parent = para, para._p
+        self._emit_bookmarks()
         try:
             yield para
         finally:
-            self.paragraph = None
-            self.run_parent = None
+            self.paragraph = self.run_parent = None
 
     @contextmanager
     def formatting(self, **flags):
         saved = self.fmt
-        self.fmt = dict(saved, **flags)
+        self.fmt = {**saved, **flags}
         try:
             yield
         finally:
@@ -196,9 +184,9 @@ class Renderer:
 
     @contextmanager
     def in_container(self, container, context="cell"):
+        saved = self.paragraph, self.run_parent
         self.containers.append(container)
         self.contexts.append(context)
-        saved = (self.paragraph, self.run_parent)
         self.paragraph = self.run_parent = None
         try:
             yield container
@@ -214,110 +202,81 @@ class Renderer:
         self.run_parent.append(r)
         run = Run(r, self.paragraph)
         run.text = text
-        f = self.fmt
-        if f.get("bold"):
-            run.bold = True
-        if f.get("italic"):
-            run.italic = True
-        if f.get("underline"):
-            run.underline = True
-        if f.get("strike"):
-            run.font.strike = True
-        if f.get("superscript"):
-            run.font.superscript = True
-        if f.get("subscript"):
-            run.font.subscript = True
-        if f.get("code"):
-            style = self.styles.get("HTML Code", S.CHARACTER)
-            if style is not None:
-                run.style = style
-            else:
-                run.font.name = MONO_FONT
-        if f.get("hyperlink"):
-            style = self.styles.get("Hyperlink", S.CHARACTER)
-            if style is not None and not f.get("code"):
-                run.style = style
-            else:
-                run.font.color.rgb = RGBColor(0x05, 0x63, 0xC1)
-                run.underline = True
+        for flag in RUN_FLAGS:
+            if self.fmt.get(flag):
+                setattr(run.font, flag, True)
+        if self.fmt.get("code"):
+            self._character_style(run, "HTML Code", font_name=MONO_FONT)
+        if self.fmt.get("hyperlink"):
+            # Inline code inside a link keeps its code style; colour it like a link.
+            style = None if self.fmt.get("code") else "Hyperlink"
+            self._character_style(run, style, color=LINK_COLOR, underline=True)
         return run
+
+    def _character_style(self, run, name, font_name=None, color=None, underline=False):
+        """Apply character style ``name``, or the given direct formatting if it's missing."""
+        style = self.styles.get(name, S.CHARACTER) if name else None
+        if style is not None:
+            run.style = style
+            return
+        if font_name:
+            run.font.name = font_name
+        if color:
+            run.font.color.rgb = color
+        if underline:
+            run.font.underline = True
 
     # -- bookmarks / hyperlinks ----------------------------------------------
 
     def bookmark_name(self, node_id):
-        name = self._bookmarks.get(node_id)
-        if name is None:
-            name = "_r2d_" + re.sub(r"[^A-Za-z0-9_]", "_", node_id)
+        """Word bookmark name for a docutils id (hidden: leading underscore, <= 40 chars)."""
+        if node_id not in self._bookmarks:
+            name = "_r2d_" + re.sub(r"\W", "_", node_id, flags=re.ASCII)
             if len(name) > 40:
-                digest = hashlib.sha1(node_id.encode()).hexdigest()[:8]
-                name = name[:31] + "_" + digest
+                name = f"{name[:31]}_{hashlib.sha1(node_id.encode()).hexdigest()[:8]}"
             self._bookmarks[node_id] = name
-        return name
+        return self._bookmarks[node_id]
 
     def _emit_bookmarks(self):
-        if not self.pending_ids or self.paragraph is None:
-            return
+        if self.paragraph is None:
+            return  # emitted when the next paragraph opens
         for node_id in self.pending_ids:
+            bookmark_id = str(self._next_bookmark_id)
+            self._next_bookmark_id += 1
             start = OxmlElement("w:bookmarkStart")
-            start.set(qn("w:id"), str(self._bookmark_id))
+            start.set(qn("w:id"), bookmark_id)
             start.set(qn("w:name"), self.bookmark_name(node_id))
             end = OxmlElement("w:bookmarkEnd")
-            end.set(qn("w:id"), str(self._bookmark_id))
-            self._bookmark_id += 1
-            self.run_parent.append(start)
-            self.run_parent.append(end)
+            end.set(qn("w:id"), bookmark_id)
+            self.run_parent.extend([start, end])
         self.pending_ids = []
-
-    def _max_bookmark_id(self):
-        ids = [int(b.get(qn("w:id"), 0)) for b in self.document.element.body.iter(qn("w:bookmarkStart"))]
-        return max(ids, default=0)
 
     @contextmanager
     def hyperlink(self, url=None, anchor_id=None):
         link = OxmlElement("w:hyperlink")
         if url is not None:
-            rid = self.paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
-            link.set(qn("r:id"), rid)
+            link.set(qn("r:id"), self.paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True))
         else:
             link.set(qn("w:anchor"), self.bookmark_name(anchor_id))
         self.run_parent.append(link)
-        saved = self.run_parent
-        self.run_parent = link
+        saved, self.run_parent = self.run_parent, link
         try:
             with self.formatting(hyperlink=True):
                 yield link
         finally:
             self.run_parent = saved
 
-    # -- paragraph style for context -----------------------------------------
 
-    def body_paragraph_style(self):
-        ctx = self.contexts[-1] if self.contexts else None
-        if isinstance(ctx, _ListState):
-            if ctx.first_paragraph:
-                return None  # handled by list item
-            return S.list_continue_chain(ctx.depth)
-        return None
-
-    def list_depth(self):
-        return sum(1 for c in self.contexts if isinstance(c, _ListState))
+# -- structure -------------------------------------------------------------------
 
 
-# -- block handlers --------------------------------------------------------------
-
-
+@register_handler(nodes.comment, nodes.target, nodes.substitution_definition,
+                  nodes.system_message, nodes.pending)
 def _skip(renderer, node):
     pass
 
 
-for _cls in (nodes.comment, nodes.target, nodes.substitution_definition,
-             nodes.system_message, nodes.pending):
-    register_handler(_cls, _skip)
-
-
-@register_handler(nodes.document)
-@register_handler(nodes.compound)
-@register_handler(nodes.container)
+@register_handler(nodes.document, nodes.compound, nodes.container)
 def _children(renderer, node):
     renderer.render_children(node)
 
@@ -333,84 +292,86 @@ def _section(renderer, node):
 
 @register_handler(nodes.title)
 def _title(renderer, node):
-    parent = node.parent
-    if isinstance(parent, nodes.section):
-        chain = S.heading_chain(max(renderer.section_depth, 1))
-    elif isinstance(parent, nodes.table):
+    if isinstance(node.parent, nodes.section):
+        chain = S.heading_chain(renderer.section_depth)
+    elif isinstance(node.parent, nodes.table):
         chain = ["Caption", "Normal"]
     else:
-        raise UnsupportedNodeError(node, "title inside <%s>" % parent.tagname)
+        raise UnsupportedNodeError(node, f"title inside <{node.parent.tagname}>")
     with renderer.inline_paragraph(chain):
         renderer.render_children(node)
 
 
 @register_handler(nodes.paragraph)
 def _paragraph(renderer, node):
-    ctx = renderer.contexts[-1] if renderer.contexts else None
-    if isinstance(ctx, _ListState) and ctx.first_paragraph:
-        ctx.first_paragraph = False
-        para_ctx = renderer.inline_paragraph(S.list_chain(ctx.kind, ctx.depth))
-        with para_ctx as para:
-            if ctx.num_id is not None:
-                set_paragraph_numbering(para, ctx.num_id, ctx.ilvl)
-            elif style_numbering(para.style) is None:
-                # The resolved style (maybe a fallback) has no numbering.
-                kind = "bullet" if ctx.kind == "bullet" else "arabic"
-                ctx.num_id, ctx.ilvl = renderer.numbering.generated(kind, ctx.depth - 1), ctx.depth - 1
-                set_paragraph_numbering(para, ctx.num_id, ctx.ilvl)
+    state = renderer.context
+    if not isinstance(state, _ListState):
+        style_chain = None
+    elif state.first_paragraph:
+        state.first_paragraph = False
+        with renderer.inline_paragraph(state.style_chain) as para:
+            if state.num_id is not None:
+                set_paragraph_numbering(para, state.num_id, state.ilvl)
             renderer.render_children(node)
         return
-    with renderer.inline_paragraph(renderer.body_paragraph_style()):
+    else:
+        style_chain = S.list_continue_chain(state.depth)
+    with renderer.inline_paragraph(style_chain):
         renderer.render_children(node)
 
 
+# -- lists -----------------------------------------------------------------------
+
+
 def _list(renderer, node, kind):
-    depth = renderer.list_depth() + 1
-    state = _ListState(kind, depth)
-    if kind == "enum":
-        enumtype = node.get("enumtype", "arabic")
-        start = node.get("start", 1)
-        style = renderer.styles.get(S.list_chain("enum", depth))
-        numbering = style_numbering(style) if style is not None else None
-        if enumtype == "arabic" and numbering is not None:
-            num_id, ilvl = numbering
-            state.num_id, state.ilvl = renderer.numbering.restart(num_id, ilvl, start), ilvl
-        else:
-            state.ilvl = depth - 1
-            state.num_id = renderer.numbering.generated(enumtype, state.ilvl, start)
+    depth = 1 + sum(isinstance(c, _ListState) for c in renderer.contexts)
+    chain = S.list_chain(kind, depth)
+    state = _ListState(chain, depth)
+    style_numbering = renderer.numbering.for_style(renderer.styles.get(chain))
+    enumtype = node.get("enumtype", "arabic")
+    start = node.get("start", 1)
+
+    if kind == "enum" and enumtype == "arabic" and style_numbering is not None:
+        # Restart the style's own numbering so each RST list counts from its start.
+        num_id, state.ilvl = style_numbering
+        state.num_id = renderer.numbering.restart(num_id, state.ilvl, start)
+    elif kind == "enum" or style_numbering is None:
+        # Letters/roman numerals, or a style without numbering: generate a definition.
+        state.ilvl = depth - 1
+        state.num_id = renderer.numbering.generated(
+            enumtype if kind == "enum" else "bullet", state.ilvl, start)
+
     renderer.contexts.append(state)
     try:
-        for item in node.children:
-            if not isinstance(item, nodes.list_item):
-                raise UnsupportedNodeError(item, "inside a list")
-            renderer.render(item)
+        renderer.render_children(node)
     finally:
         renderer.contexts.pop()
 
 
-register_handler(nodes.bullet_list, lambda r, n: _list(r, n, "bullet"))
-register_handler(nodes.enumerated_list, lambda r, n: _list(r, n, "enum"))
+register_handler(nodes.bullet_list)(partial(_list, kind="bullet"))
+register_handler(nodes.enumerated_list)(partial(_list, kind="enum"))
 
 
 @register_handler(nodes.list_item)
 def _list_item(renderer, node):
-    state = renderer.contexts[-1]
+    state = renderer.context
     state.first_paragraph = True
-    if not node.children or not isinstance(node.children[0], nodes.paragraph):
-        # Empty item or one starting with a non-paragraph: still emit the bullet.
-        node.insert(0, nodes.paragraph())
+    if not node.children or not isinstance(node[0], nodes.paragraph):
+        _paragraph(renderer, nodes.paragraph())  # still emit the bullet/number
     renderer.render_children(node)
     state.first_paragraph = False
 
 
-@register_handler(nodes.literal_block)
-@register_handler(nodes.doctest_block)
+# -- blocks ----------------------------------------------------------------------
+
+
+@register_handler(nodes.literal_block, nodes.doctest_block)
 def _literal_block(renderer, node):
-    style = renderer.styles.get(list(S.MONOSPACE_PARAGRAPH_STYLES) + ["Normal"])
+    style = renderer.styles.get([*S.MONOSPACE_PARAGRAPH_STYLES, "Normal"])
     with renderer.inline_paragraph() as para:
         if style is not None:
             para.style = style
-        run = renderer.add_text(node.astext())
+        run = renderer.add_text(node.astext())  # "\n" becomes a line break
         if style is None or style.name not in S.MONOSPACE_PARAGRAPH_STYLES:
             run.font.name = MONO_FONT
             run.font.size = Pt(9)
@@ -418,138 +379,110 @@ def _literal_block(renderer, node):
 
 @register_handler(nodes.block_quote)
 def _block_quote(renderer, node):
-    # Indented text in RST; usually accidental inside lists. Render as Quote.
     for child in node.children:
-        if isinstance(child, nodes.paragraph):
+        if isinstance(child, (nodes.paragraph, nodes.attribution)):
             with renderer.inline_paragraph(["Quote", "Normal"]):
-                renderer.render_children(child)
-        elif isinstance(child, nodes.attribution):
-            with renderer.inline_paragraph(["Quote", "Normal"]):
-                renderer.add_text("— ")
+                if isinstance(child, nodes.attribution):
+                    renderer.add_text("— ")
                 renderer.render_children(child)
         else:
             renderer.render(child)
 
 
+@register_handler(nodes.admonition, nodes.attention, nodes.caution, nodes.danger,
+                  nodes.error, nodes.hint, nodes.important, nodes.note, nodes.tip,
+                  nodes.warning)
 def _admonition(renderer, node):
-    if isinstance(node, nodes.admonition):
-        title_node = node.next_node(nodes.title)
-        body = [c for c in node.children if c is not title_node]
-    else:
-        title_node = None
-        body = list(node.children)
+    """A boxed single-cell table with a bold title line."""
+    # Only the generic ``.. admonition::`` carries a title node, as its first child.
+    title = node[0] if isinstance(node, nodes.admonition) else None
     table = renderer.container.add_table(1, 1)
-    style = renderer.styles.get("Table Grid", S.TABLE)
-    if style is not None:
+    if (style := renderer.styles.get("Table Grid", S.TABLE)) is not None:
         table.style = style
     with renderer.in_container(CellContainer(table.cell(0, 0))):
-        with renderer.inline_paragraph():
-            with renderer.formatting(bold=True):
-                if title_node is not None:
-                    renderer.render_children(title_node)
-                else:
-                    renderer.add_text(node.tagname.capitalize())
-        for child in body:
+        with renderer.inline_paragraph(), renderer.formatting(bold=True):
+            if title is not None:
+                renderer.render_children(title)
+            else:
+                renderer.add_text(node.tagname.capitalize())
+        for child in node.children[1 if title is not None else 0:]:
             renderer.render(child)
-
-
-register_handler(nodes.admonition, _admonition)
-for _cls in ADMONITIONS:
-    register_handler(_cls, _admonition)
 
 
 # -- tables ------------------------------------------------------------------------
 
 
-def _mark_header_row(row):
-    trPr = row._tr.get_or_add_trPr()
-    if trPr.find(qn("w:tblHeader")) is None:
-        trPr.append(OxmlElement("w:tblHeader"))
-
-
-@register_handler(nodes.table)
-def _table(renderer, node):
-    title = None
-    tgroup = None
-    for child in node.children:
-        if isinstance(child, nodes.title):
-            title = child
-        elif isinstance(child, nodes.tgroup):
-            tgroup = child
-        else:
-            raise UnsupportedNodeError(child, "inside a table")
-    if tgroup is None:
-        raise UnsupportedNodeError(node, "table without tgroup")
-
-    ncols = tgroup["cols"]
-    colwidths = []
-    head_rows, body_rows = [], []
-    for child in tgroup.children:
-        if isinstance(child, nodes.colspec):
-            colwidths.append(child.get("colwidth", 1))
-        elif isinstance(child, nodes.thead):
-            head_rows.extend(child.children)
-        elif isinstance(child, nodes.tbody):
-            body_rows.extend(child.children)
-    rows = head_rows + body_rows
-    if not rows:
-        raise UnsupportedNodeError(node, "table with no rows")
-
-    # Lay entries out on a grid, honouring row/column spans.
+def _grid_layout(rows):
+    """Yield ``(row, col, morerows, morecols, entry)`` with spans placed on a grid."""
     occupied = set()
-    placements = []
     for r, row in enumerate(rows):
         c = 0
         for entry in row.children:
             while (r, c) in occupied:
                 c += 1
             mr, mc = entry.get("morerows", 0), entry.get("morecols", 0)
-            placements.append((r, c, mr, mc, entry))
-            for rr in range(r, r + mr + 1):
-                for cc in range(c, c + mc + 1):
-                    occupied.add((rr, cc))
+            occupied.update((rr, cc) for rr in range(r, r + mr + 1) for cc in range(c, c + mc + 1))
+            yield r, c, mr, mc, entry
             c += mc + 1
+
+
+def _children_of_type(node, cls):
+    return [child for child in node.children if isinstance(child, cls)]
+
+
+def _first_child_of_type(node, cls):
+    return next((child for child in node.children if isinstance(child, cls)), None)
+
+
+@register_handler(nodes.table)
+def _table(renderer, node):
+    title = _first_child_of_type(node, nodes.title)
+    tgroup = _first_child_of_type(node, nodes.tgroup)
+    if tgroup is None:
+        raise UnsupportedNodeError(node, "table without tgroup")
+    colwidths = [c.get("colwidth", 1) for c in _children_of_type(tgroup, nodes.colspec)]
+    head_rows = [row for part in _children_of_type(tgroup, nodes.thead) for row in part.children]
+    body_rows = [row for part in _children_of_type(tgroup, nodes.tbody) for row in part.children]
+    rows = head_rows + body_rows
+    if not rows:
+        raise UnsupportedNodeError(node, "table with no rows")
+    layout = list(_grid_layout(rows))
+    ncols = tgroup["cols"]
 
     if title is not None:
         renderer.render(title)
-
     table = renderer.container.add_table(len(rows), ncols)
-    style = renderer.styles.get("Table Grid", S.TABLE)
-    if style is not None:
+    if (style := renderer.styles.get("Table Grid", S.TABLE)) is not None:
         table.style = style
 
-    for r, c, mr, mc, _ in placements:
+    for r, c, mr, mc, _ in layout:
         if mr or mc:
             table.cell(r, c).merge(table.cell(r + mr, c + mc))
 
     if len(colwidths) == ncols and isinstance(renderer.container, AnchorContainer):
         table.autofit = False
-        total = float(sum(colwidths))
+        total = sum(colwidths)
         widths = [int(renderer.container.width * w / total) for w in colwidths]
-        for i, w in enumerate(widths):
-            table.columns[i].width = w
-        for r, c, mr, mc, _ in placements:
+        for column, width in zip(table.columns, widths):
+            column.width = width
+        for r, c, _, mc, _ in layout:
             table.cell(r, c).width = sum(widths[c:c + mc + 1])
 
-    for i in range(len(head_rows)):
-        _mark_header_row(table.rows[i])
+    for row in table.rows[:len(head_rows)]:
+        row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))  # repeat on each page
 
-    for r, c, mr, mc, entry in placements:
-        with renderer.in_container(CellContainer(table.cell(r, c))):
-            if r < len(head_rows):
-                with renderer.formatting(bold=True):
-                    renderer.render_children(entry)
-            else:
-                renderer.render_children(entry)
+    for r, c, _, _, entry in layout:
+        with renderer.in_container(CellContainer(table.cell(r, c))), \
+                renderer.formatting(bold=r < len(head_rows)):
+            renderer.render_children(entry)
 
 
-# -- inline handlers -------------------------------------------------------------
+# -- inline ------------------------------------------------------------------------
 
 
 @register_handler(nodes.Text)
 def _text(renderer, node):
-    text = node.astext().replace("\n", " ")
-    if text:
+    if text := node.astext().replace("\n", " "):
         renderer.add_text(text)
 
 
@@ -560,37 +493,28 @@ def _formatted(**flags):
     return handler
 
 
-register_handler(nodes.strong, _formatted(bold=True))
-register_handler(nodes.emphasis, _formatted(italic=True))
-register_handler(nodes.title_reference, _formatted(italic=True))
-register_handler(nodes.literal, _formatted(code=True))
-register_handler(nodes.superscript, _formatted(superscript=True))
-register_handler(nodes.subscript, _formatted(subscript=True))
-
-INLINE_CLASS_FLAGS = {"underline": "underline", "strike": "strike"}
+register_handler(nodes.strong)(_formatted(bold=True))
+register_handler(nodes.emphasis, nodes.title_reference)(_formatted(italic=True))
+register_handler(nodes.literal)(_formatted(code=True))
+register_handler(nodes.superscript)(_formatted(superscript=True))
+register_handler(nodes.subscript)(_formatted(subscript=True))
 
 
 @register_handler(nodes.inline)
 def _inline(renderer, node):
-    flags = {INLINE_CLASS_FLAGS[c]: True for c in node.get("classes", []) if c in INLINE_CLASS_FLAGS}
+    flags = {cls: True for cls in node.get("classes", []) if cls in INLINE_CLASSES}
     with renderer.formatting(**flags):
         renderer.render_children(node)
 
 
-@register_handler(nodes.reference)
+@register_handler(nodes.reference, ref_node)
 def _reference(renderer, node):
+    # ref_node (:ref:) gets its refid from api._resolve_refs before rendering.
     if "refuri" in node:
-        with renderer.hyperlink(url=node["refuri"]):
-            renderer.render_children(node)
+        link = renderer.hyperlink(url=node["refuri"])
     elif "refid" in node:
-        with renderer.hyperlink(anchor_id=node["refid"]):
-            renderer.render_children(node)
+        link = renderer.hyperlink(anchor_id=node["refid"])
     else:
         raise UnsupportedNodeError(node, "unresolved reference")
-
-
-@register_handler(ref_node)
-def _ref(renderer, node):
-    # Resolved by api.resolve_refs before rendering; refid is always set here.
-    with renderer.hyperlink(anchor_id=node["refid"]):
+    with link:
         renderer.render_children(node)

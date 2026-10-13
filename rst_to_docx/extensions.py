@@ -18,6 +18,7 @@ Directives
 """
 
 import re
+from collections.abc import Iterable
 
 from docutils import nodes
 from docutils.parsers.rst import Directive, directives, roles
@@ -26,72 +27,67 @@ from .variables import VariableLookupError, format_scalar, lookup, lookup_scalar
 
 SETTING_VARIABLES = "rst2docx_variables"
 SETTING_JIRA_URL = "rst2docx_jira_url"
+CELL_FORMATS = {"jira", "code"}
 
+# docutils escapes backslashes as \x00, so "\<" is not an explicit title.
 _EXPLICIT_TITLE = re.compile(r"^(.+?)\s*(?<!\x00)<(.*?)>$", re.DOTALL)
 _JIRA_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 
 
 class ref_node(nodes.Inline, nodes.TextElement):
-    """Unresolved :ref: cross-reference; resolved by the renderer."""
+    """Unresolved :ref: cross-reference; resolved in api._resolve_refs."""
 
 
 def _split_explicit_title(text):
-    m = _EXPLICIT_TITLE.match(text)
-    if m:
-        return True, m.group(1), m.group(2)
-    return False, text, text
+    """``"text <target>"`` -> ``("text", "target")``; ``"target"`` -> ``(None, "target")``."""
+    if m := _EXPLICIT_TITLE.match(text):
+        return m.group(1), m.group(2).strip()
+    return None, text.strip()
 
 
-def _settings(inliner_or_state, name):
-    return getattr(inliner_or_state.document.settings, name, None)
+def _setting(document, name):
+    return getattr(document.settings, name, None)
 
 
 def _role_error(inliner, rawtext, lineno, message):
     msg = inliner.reporter.error(message, line=lineno)
-    prb = inliner.problematic(rawtext, rawtext, msg)
-    return [prb], [msg]
+    return [inliner.problematic(rawtext, rawtext, msg)], [msg]
 
 
-def jira_url_for(base, key):
-    if "{key}" in base:
-        return base.replace("{key}", key)
-    return base.rstrip("/") + "/" + key
+def jira_reference(base_url, key, text=None):
+    """Reference node linking ``key`` to ``base_url`` (which may contain ``{key}``)."""
+    if not _JIRA_KEY.match(key):
+        raise ValueError(f"{key!r} is not a Jira issue key")
+    url = base_url.replace("{key}", key) if "{key}" in base_url else f"{base_url.rstrip('/')}/{key}"
+    return nodes.reference(text or key, text or key, refuri=url)
 
 
-def make_jira_reference(base, key, text=None):
-    return nodes.reference(text or key, text or key, refuri=jira_url_for(base, key))
-
-
-# -- roles -------------------------------------------------------------------
+# -- roles -----------------------------------------------------------------------
 
 
 def var_role(name, rawtext, text, lineno, inliner, options=None, content=None):
-    variables = _settings(inliner, SETTING_VARIABLES) or {}
-    path = text.strip()
+    variables = _setting(inliner.document, SETTING_VARIABLES) or {}
     try:
-        value = lookup_scalar(variables, path)
+        value = lookup_scalar(variables, text.strip())
     except VariableLookupError as exc:
-        return _role_error(inliner, rawtext, lineno, ":var: %s" % exc)
+        return _role_error(inliner, rawtext, lineno, f":var: {exc}")
     return [nodes.inline(rawtext, value, classes=["var"])], []
 
 
 def jira_role(name, rawtext, text, lineno, inliner, options=None, content=None):
-    base = _settings(inliner, SETTING_JIRA_URL)
-    if not base:
-        return _role_error(
-            inliner, rawtext, lineno, ":jira: used but no jira_url was passed to render()"
-        )
-    has_title, title, key = _split_explicit_title(text)
-    key = key.strip()
-    if not _JIRA_KEY.match(key):
-        return _role_error(inliner, rawtext, lineno, ":jira: %r is not a Jira issue key" % key)
-    return [make_jira_reference(base, key, title if has_title else None)], []
+    base_url = _setting(inliner.document, SETTING_JIRA_URL)
+    if not base_url:
+        return _role_error(inliner, rawtext, lineno, ":jira: used but no jira_url was passed to render()")
+    title, key = _split_explicit_title(text)
+    try:
+        return [jira_reference(base_url, key, title)], []
+    except ValueError as exc:
+        return _role_error(inliner, rawtext, lineno, f":jira: {exc}")
 
 
 def ref_role(name, rawtext, text, lineno, inliner, options=None, content=None):
-    has_title, title, label = _split_explicit_title(text)
-    node = ref_node(rawtext, title if has_title else "", reflabel=label.strip(),
-                    explicit_title=has_title)
+    title, label = _split_explicit_title(text)
+    node = ref_node(rawtext, title or "", reflabel=label, explicit_title=title is not None)
     node.line = lineno
     node.source = inliner.document.current_source
     return [node], []
@@ -103,33 +99,26 @@ def _class_role(cls):
     return role
 
 
-# -- var-table -----------------------------------------------------------------
-
-
-FORMATTERS = ("jira", "code")
+# -- var-table -------------------------------------------------------------------
 
 
 def parse_columns(spec):
     """Parse ``key=Header[:fmt], ...`` into ``[(key, header, fmt), ...]``.
 
     Entries are separated by commas or newlines. A trailing ``:jira`` or
-    ``:code`` on the header selects a cell formatter; any other colon is kept
-    as part of the header text.
+    ``:code`` on the header selects a cell format; any other colon is kept as
+    part of the header text.
     """
     columns = []
-    for raw in re.split(r"[,\n]", spec):
-        raw = raw.strip()
-        if not raw:
-            continue
-        key, sep, header = raw.partition("=")
-        key = key.strip()
-        header = header.strip() if sep else key
-        fmt = None
-        head, colon, suffix = header.rpartition(":")
-        if colon and suffix.strip() in FORMATTERS:
-            header, fmt = head.strip(), suffix.strip()
+    for raw in filter(None, (s.strip() for s in re.split(r"[,\n]", spec))):
+        key, _, header = (s.strip() for s in raw.partition("="))
         if not key:
-            raise ValueError("empty column key in %r" % raw)
+            raise ValueError(f"empty column key in {raw!r}")
+        header = header or key
+        fmt = None
+        head, _, suffix = header.rpartition(":")
+        if head and suffix.strip() in CELL_FORMATS:
+            header, fmt = head.strip(), suffix.strip()
         columns.append((key, header, fmt))
     if not columns:
         raise ValueError("no columns given")
@@ -143,6 +132,10 @@ def _positive_int_list(argument):
     return values
 
 
+def _row(paragraphs, **entry_attrs):
+    return nodes.row("", *(nodes.entry("", para, **entry_attrs) for para in paragraphs))
+
+
 class VarTable(Directive):
     """Render a list of mappings from the variables dict as a table.
 
@@ -154,8 +147,6 @@ class VarTable(Directive):
     """
 
     required_arguments = 1
-    optional_arguments = 0
-    has_content = False
     option_spec = {
         "columns": directives.unchanged_required,
         "widths": _positive_int_list,
@@ -164,102 +155,70 @@ class VarTable(Directive):
         "class": directives.class_option,
     }
 
+    def fail(self, message):
+        return self.error(f"var-table {self.arguments[0]!r}: {message}")
+
     def run(self):
         path = self.arguments[0].strip()
         if "columns" not in self.options:
-            raise self.error("var-table %r: the :columns: option is required" % path)
+            raise self.fail("the :columns: option is required")
         try:
             columns = parse_columns(self.options["columns"])
         except ValueError as exc:
-            raise self.error("var-table %r: bad :columns: (%s)" % (path, exc))
-        widths = self.options.get("widths") or [1] * len(columns)
+            raise self.fail(f"bad :columns: ({exc})")
+        widths = self.options.get("widths", [1] * len(columns))
         if len(widths) != len(columns):
-            raise self.error(
-                "var-table %r: %d widths given for %d columns" % (path, len(widths), len(columns))
-            )
+            raise self.fail(f"{len(widths)} widths given for {len(columns)} columns")
 
-        variables = getattr(self.state.document.settings, SETTING_VARIABLES, None) or {}
-        jira_base = getattr(self.state.document.settings, SETTING_JIRA_URL, None)
+        document = self.state.document
+        jira_url = _setting(document, SETTING_JIRA_URL)
+        if not jira_url and any(fmt == "jira" for _, _, fmt in columns):
+            raise self.fail("a :jira column is used but no jira_url was passed to render()")
         try:
-            rows = lookup(variables, path)
+            records = lookup(_setting(document, SETTING_VARIABLES) or {}, path)
         except VariableLookupError as exc:
-            raise self.error("var-table: %s" % exc)
-        if rows is None:
-            rows = []
-        if isinstance(rows, (str, bytes)) or not hasattr(rows, "__iter__"):
-            raise self.error("var-table: variable %r is not a list" % path)
-
-        if any(fmt == "jira" for _, _, fmt in columns) and not jira_base:
-            raise self.error(
-                "var-table %r: a :jira column is used but no jira_url was passed to render()"
-                % path
-            )
-
-        messages = []
-        table = nodes.table(classes=self.options.get("class", []))
-        if self.options.get("title"):
-            title_text = self.options["title"]
-            title_nodes, messages = self.state.inline_text(title_text, self.lineno)
-            table += nodes.title(title_text, "", *title_nodes)
-        tgroup = nodes.tgroup(cols=len(columns))
-        table += tgroup
-        for w in widths:
-            tgroup += nodes.colspec(colwidth=w)
-
-        thead = nodes.thead()
-        tgroup += thead
-        thead += self._row([nodes.paragraph(h, h) for _, h, _ in columns])
+            raise self.fail(str(exc))
+        if records is None:
+            records = []
+        if isinstance(records, (str, bytes)) or not isinstance(records, Iterable):
+            raise self.fail("variable is not a list")
 
         tbody = nodes.tbody()
-        tgroup += tbody
-        count = 0
-        for index, record in enumerate(rows):
-            count += 1
-            cells = []
-            for key, _, fmt in columns:
-                try:
-                    value = lookup(record, key)
-                except VariableLookupError as exc:
-                    raise self.error("var-table %r row %d: %s" % (path, index, exc))
-                try:
-                    cells.append(self._cell(key, value, fmt, jira_base))
-                except ValueError as exc:
-                    raise self.error("var-table %r row %d: %s" % (path, index, exc))
-            tbody += self._row(cells)
-
-        if count == 0 and self.options.get("empty"):
+        for index, record in enumerate(records):
+            try:
+                tbody += _row(self._cell(record, key, fmt, jira_url) for key, _, fmt in columns)
+            except (VariableLookupError, ValueError) as exc:
+                raise self.fail(f"row {index}: {exc}")
+        if not tbody.children and "empty" in self.options:
             text = self.options["empty"]
-            entry = nodes.entry(morecols=len(columns) - 1)
-            entry += nodes.paragraph(text, text)
-            row = nodes.row()
-            row += entry
-            tbody += row
+            tbody += _row([nodes.paragraph(text, text)], morecols=len(columns) - 1)
 
+        table = nodes.table(classes=self.options.get("class", []))
+        messages = []
+        if title := self.options.get("title"):
+            title_nodes, messages = self.state.inline_text(title, self.lineno)
+            table += nodes.title(title, "", *title_nodes)
+        table += nodes.tgroup(
+            "",
+            *(nodes.colspec(colwidth=w) for w in widths),
+            nodes.thead("", _row(nodes.paragraph(h, h) for _, h, _ in columns)),
+            tbody,
+            cols=len(columns),
+        )
         self.add_name(table)
         table.line = self.lineno
-        return [table] + messages
+        return [table, *messages]
 
     @staticmethod
-    def _row(paragraphs):
-        row = nodes.row()
-        for para in paragraphs:
-            entry = nodes.entry()
-            entry += para
-            row += entry
-        return row
-
-    @staticmethod
-    def _cell(key, value, fmt, jira_base):
-        values = list(value) if isinstance(value, (list, tuple)) else [value]
+    def _cell(record, key, fmt, jira_url):
+        value = lookup(record, key)
         para = nodes.paragraph()
-        for i, item in enumerate(values):
+        for i, item in enumerate(value if isinstance(value, (list, tuple)) else [value]):
             if i:
                 para += nodes.Text(", ")
             text = format_scalar(key, item)
             if fmt == "jira":
-                if not _JIRA_KEY.match(text):
-                    raise ValueError("%r is not a Jira issue key" % text)
-                para += make_jira_reference(jira_base, text)
+                para += jira_reference(jira_url, text)
             elif fmt == "code":
                 para += nodes.literal(text, text)
             else:

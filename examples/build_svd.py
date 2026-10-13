@@ -17,15 +17,16 @@ HERE = Path(__file__).parent
 
 
 def file_records(dist):
-    records = []
-    for path in sorted(p for p in dist.iterdir() if p.is_file()):
-        records.append({
+    return [
+        {
             "name": path.name,
             "version": "1.4.2",
-            "size": "{:,}".format(path.stat().st_size),
+            "size": f"{path.stat().st_size:,}",
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        })
-    return records
+        }
+        for path in sorted(dist.iterdir())
+        if path.is_file()
+    ]
 
 
 SAMPLE_FILES = [

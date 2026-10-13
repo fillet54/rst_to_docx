@@ -7,11 +7,15 @@ name = "rst-to-docx"
 version = "0.1.0"
 description = "Render reStructuredText into a Word template with python-docx"
 readme = "Readme.md"
-requires-python = ">=3.9"
-dependencies = ["python-docx>=1.1", "docutils>=0.18"]
+requires-python = ">=3.10"
+dependencies = ["python-docx>=0.8.11", "docutils>=0.18.1"]
 
 [project.optional-dependencies]
 test = ["pytest"]
 
 [tool.setuptools]
 packages = ["rst_to_docx"]
+
+[tool.pytest.ini_options]
+# Fallback-style warnings are expected with the bare python-docx test templates.
+filterwarnings = ["ignore::rst_to_docx.errors.MissingStyleWarning"]

@@ -21,7 +21,8 @@ and a change log linked to Jira.
 sample document. Run ``python examples/build_svd.py`` to produce
 ``examples/svd.docx``.
 
-Install: ``pip install -e .`` (python-docx and docutils).
+Install: ``pip install -e .``. Requires Python 3.10+, python-docx 0.8.11+ and
+docutils 0.18.1+.
 
 The template
 ============
