@@ -1,0 +1,83 @@
+"""Resolve built-in Word style names against the template, with fallbacks.
+
+Word only writes a built-in style into styles.xml once it has been used, so a
+template may lack e.g. "Heading 5" or "List Bullet 3". Rather than fail, each
+lookup walks a fallback chain and emits a single MissingStyleWarning per
+missing name.
+"""
+
+import warnings
+
+from docx.enum.style import WD_STYLE_TYPE
+
+from .errors import MissingStyleWarning
+
+PARAGRAPH = WD_STYLE_TYPE.PARAGRAPH
+CHARACTER = WD_STYLE_TYPE.CHARACTER
+TABLE = WD_STYLE_TYPE.TABLE
+
+MONOSPACE_PARAGRAPH_STYLES = ("Plain Text", "Macro Text", "HTML Preformatted")
+
+
+def heading_chain(level):
+    return ["Heading %d" % n for n in range(level, 0, -1)] + ["Normal"]
+
+
+def _numbered_chain(base, level, final):
+    chain = ["%s %d" % (base, n) for n in range(level, 1, -1)] + [base]
+    return chain + list(final)
+
+
+def list_chain(kind, level):
+    base = {"bullet": "List Bullet", "enum": "List Number"}[kind]
+    return _numbered_chain(base, level, ["List Paragraph", "Normal"])
+
+
+def list_continue_chain(level):
+    return _numbered_chain("List Continue", level, ["Normal"])
+
+
+class StyleResolver:
+    def __init__(self, document):
+        self.document = document
+        self._cache = {}
+        self._warned = set()
+
+    def get(self, chain, style_type=PARAGRAPH):
+        """Return the first style in ``chain`` present in the template.
+
+        ``chain`` is a name or a list of names. Returns ``None`` when nothing in
+        the chain exists (callers then rely on direct formatting or defaults).
+        """
+        if isinstance(chain, str):
+            chain = [chain]
+        key = (tuple(chain), style_type)
+        if key in self._cache:
+            return self._cache[key]
+        found = None
+        for name in chain:
+            style = self._lookup(name, style_type)
+            if style is not None:
+                found = style
+                break
+        wanted = chain[0]
+        if (found is None or found.name != wanted) and wanted not in self._warned:
+            self._warned.add(wanted)
+            fallback = repr(found.name) if found is not None else "direct formatting"
+            warnings.warn(
+                "style %r not found in template; using %s. Use the style once on "
+                "the template's instructions page so Word saves it." % (wanted, fallback),
+                MissingStyleWarning,
+                stacklevel=4,
+            )
+        self._cache[key] = found
+        return found
+
+    def _lookup(self, name, style_type):
+        try:
+            style = self.document.styles[name]
+        except KeyError:
+            return None
+        if style.type != style_type:
+            return None
+        return style

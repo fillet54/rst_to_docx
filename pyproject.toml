@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rst-to-docx"
+version = "0.1.0"
+description = "Render reStructuredText into a Word template with python-docx"
+readme = "Readme.md"
+requires-python = ">=3.9"
+dependencies = ["python-docx>=1.1", "docutils>=0.18"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["rst_to_docx"]
